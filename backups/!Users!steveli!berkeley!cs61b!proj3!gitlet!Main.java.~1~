@@ -1,0 +1,669 @@
+package gitlet;
+
+
+import java.util.Set;
+import java.util.HashMap;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.ArrayList;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.ObjectOutputStream;
+import java.io.FileInputStream;
+import java.io.ObjectInputStream;
+
+import static gitlet.Utils.*;
+import static java.io.File.separator;
+
+/** Driver class for Gitlet, the tiny stupid hacked-together-in-3-days
+ *  version-control system.
+ *
+ *  Credit to proj1 and proj2, for ideas on parsing commands.
+ *  Credit to Piazza for helping me realize that the commit tree is just a
+ *  directed acyclic graph.
+ *
+ *  @author Steve Li
+ */
+public class Main {
+
+    /** Usage: java gitlet.Main ARGS, where ARGS contains
+     *  <COMMAND> <OPERAND> .... */
+    public static void main(String... args) {
+        try {
+            InputBuffer input = new InputBuffer(args);
+            doCommand(input);
+        } catch (GitletException e) {
+            System.out.println(e.getMessage());
+            System.exit(0);
+        }
+    }
+
+    /** Do a command from INPUT. */
+    static void doCommand(InputBuffer input) {
+        String command = input.nextCommand();
+        if (command.equals("init")) {
+            doInit(input);
+            return;
+        }
+        CommitDAG graph = CommitDAG.deserialize();
+        TrackingManager tracker = TrackingManager.deserialize();
+        switch (command) {
+        case "add":
+            doAdd(input, graph, tracker);
+            break;
+        case "commit":
+            doCommit(input, graph, tracker);
+            break;
+        case "rm":
+            doRemove(input, graph, tracker);
+            break;
+        case "log":
+            doLog(input, graph);
+            break;
+        case "global-log":
+            doGlobalLog(input, graph);
+            break;
+        case "find":
+            doFind(input, graph);
+            break;
+        case "status":
+            doStatus(input, graph, tracker);
+            break;
+        case "checkout":
+            doCheckout(input, graph, tracker);
+            break;
+        case "branch":
+            doBranch(input, graph, tracker);
+            break;
+        case "rm-branch":
+            doRemoveBranch(input, graph, tracker);
+            break;
+        case "reset":
+            doReset(input, graph, tracker);
+            break;
+        case "merge":
+            doMerge(input, graph, tracker);
+            break;
+        default:
+            throw new GitletException("Command fell through: " + command);
+        }
+        graph.serialize();
+        tracker.serialize();
+    }
+
+    /** Do an init command from INPUT. */
+    static void doInit(InputBuffer input) throws GitletException {
+        input.expectRemaining(0);
+
+        File internalDir = new File(INTERNAL_DIR);
+        if (internalDir.exists()) {
+            throw new GitletException("A Gitlet version-control system already"
+                + " exists in the current directory.");
+        } else {
+            internalDir.mkdir();
+        }
+
+        File commitDir = new File(Commit.INTERNAL_PATH);
+        File blobDir = new File(Blob.INTERNAL_PATH);
+        File stagingDir = new File(STAGING_DIR);
+
+        commitDir.mkdir();
+        blobDir.mkdir();
+        stagingDir.mkdir();
+
+        CommitDAG graph = new CommitDAG();
+        TrackingManager tracker = new TrackingManager(graph.getCommit(
+            Commit.INIT.id()));
+        graph.serialize();
+        tracker.serialize();
+    }
+
+    /** Do an add command from INPUT onto GRAPH, using TRACKER. */
+    static void doAdd(InputBuffer input, CommitDAG graph,
+                      TrackingManager tracker) {
+        input.expectRemaining(1);
+        String fileName = input.next();
+        Blob blob;
+
+        File f = new File(fileName);
+        if (!f.exists()) {
+            throw new GitletException("File does not exist.");
+        }
+        blob = new Blob(f);
+
+
+        tracker.stage(blob);
+        if (!tracker.isDuplicated(blob)) {
+            writeToStaging(blob);
+        }
+    }
+
+    /** Stage BLOB in TRACKER. */
+    static void doAdd(Blob blob, TrackingManager tracker) {
+        tracker.stage(blob);
+        if (!tracker.isDuplicated(blob)) {
+            writeToStaging(blob);
+        }
+    }
+
+    /** Write BLOB to STAGING_DIR. */
+    static void writeToStaging(Blob blob) {
+        try {
+            File outFile = new File(STAGING_DIR + blob.id());
+            ObjectOutputStream out =
+                    new ObjectOutputStream(new FileOutputStream(outFile));
+            out.writeObject(blob);
+            out.close();
+        } catch (IOException excp) {
+            /* Ignore IOException. */
+        }
+    }
+
+    /** Clear all files in STAGING_DIR. */
+    static void clearStagingDir() {
+        for (String fileName : plainFilenamesIn(STAGING_DIR)) {
+            File toDelete = new File(STAGING_DIR + fileName);
+            restrictedDelete(toDelete.getName());
+        }
+    }
+
+    /** Serializes the blob with id ID in STAGING_DIR to the main blob
+     *  directory. */
+    static void rescueFromStaging(String id) {
+        File inFile = new File(STAGING_DIR + id);
+        Blob targetBlob;
+        try {
+            ObjectInputStream inp =
+                new ObjectInputStream(new FileInputStream(inFile));
+            targetBlob = (Blob) inp.readObject();
+            targetBlob.serialize();
+        } catch (IOException | ClassNotFoundException excp) {
+            /* Ignore IOException. */
+        }
+    }
+
+    /** Make a new commit using INPUT, graph, and TRACKER, and add it to graph.
+     *  Also clears staging. If no changes have been made or INPUT is
+     *  incorrect, throws an exception.
+     *
+     *  @param GRAPH
+     */
+    static void doCommit(InputBuffer input, CommitDAG graph,
+                         TrackingManager tracker) {
+        try {
+            input.expectRemaining(1);
+        } catch (GitletException E) {
+            if (input.remaining() == 0) {
+                throw new GitletException("Please enter a commit message.");
+            } else {
+                throw E;
+            }
+        }
+        String msg = input.next();
+        doCommit(msg, graph, tracker, null);
+    }
+
+    /** Construct and do a new commit, with msg MSG. Pulls all of the new
+     *  commit's blobs from the staging area. MERGEPARENT is null if not
+     *  a merge commit.
+     *
+     *  @param TRACKER
+     *  @param GRAPH
+     */
+    static void doCommit(String msg, CommitDAG graph,
+                         TrackingManager tracker, String mergeParent) {
+        if (!tracker.changed()) {
+            throw new GitletException("No changes added to the commit.");
+        }
+        Commit newHead = tracker.fromStaging(msg, mergeParent);
+        for (String blobID : newHead.blobIDs()) {
+            File checkBlobDir = new File(BLOBS_DIR + blobID);
+            if (checkBlobDir.exists()) {
+                continue;
+            }
+            rescueFromStaging(blobID);
+        }
+
+        graph.add(newHead);
+        tracker.setHead(newHead);
+        clearStagingDir();
+    }
+
+    /** Do the remove command.
+     *  @param INPUT
+     *  @param GRAPH
+     *  @param TRACKER
+     */
+    static void doRemove(InputBuffer input, CommitDAG graph,
+                         TrackingManager tracker) {
+        input.expectRemaining(1);
+        String fileName = input.next();
+        doRemove(fileName, graph, tracker);
+    }
+
+    /** Remove FILENAME from TRACKER wrt GRAPH. */
+    static void doRemove(String fileName, CommitDAG graph,
+                         TrackingManager tracker) {
+        boolean staged = tracker.isStaged(fileName);
+        boolean trackedByHead = tracker.headIsTracking(fileName);
+        if (!staged && !trackedByHead) {
+            throw new GitletException("No reason to remove the file.");
+        }
+        if (trackedByHead) {
+            restrictedDelete(fileName);
+        }
+
+        tracker.unstage(fileName);
+    }
+
+    /** Do a log command on GRAPH using INPUT. */
+    static void doLog(InputBuffer input, CommitDAG graph) {
+        graph.printLog();
+    }
+
+    /** Do a global-log command on GRAPH using INPUT. */
+    static void doGlobalLog(InputBuffer input, CommitDAG graph) {
+        graph.printGlobalLog();
+    }
+
+    /** Do a find command on GRAPH using INPUT. */
+    static void doFind(InputBuffer input, CommitDAG graph) {
+        input.expectRemaining(1);
+        String target = input.next();
+        List<String> searchResults = graph.find(target);
+        if (searchResults.size() == 0) {
+            throw new GitletException("Found no commit with that message.");
+        }
+
+        for (String sha1 : searchResults) {
+            System.out.println(sha1);
+        }
+    }
+
+    /** Use a sieve-like approach to print the status using INPUT,
+     *  DAG, TRACKER, GRAPH, and TM. */
+    static void doStatus(InputBuffer input, CommitDAG graph,
+                         TrackingManager tracker) {
+        List<String> sortedFileNames = plainFilenamesIn(".");
+        HashMap<String, Boolean> processed = new HashMap<String, Boolean>();
+        for (String fileName : sortedFileNames) {
+            processed.put(fileName, false);
+        }
+        String currentBranch = graph.currentBranch();
+        List<String> sortedBranches = new ArrayList<String>();
+        sortedBranches.addAll(graph.branches().keySet());
+        Collections.sort(sortedBranches);
+        System.out.println("=== Branches ===");
+        for (String branch : sortedBranches) {
+            if (branch.equals(currentBranch)) {
+                System.out.print("*");
+            }
+            System.out.println(branch);
+        }
+        System.out.println();
+        HashMap<String, String> stagedFiles = tracker.stagedForCommit();
+        Set<String> removedFiles = tracker.removedFiles();
+        System.out.println("=== Staged Files ===");
+        for (String candidate : sortedFileNames) {
+            if (stagedFiles.containsKey(candidate)
+                    && !stagedFiles.get(candidate).equals(tracker.head()
+                    .getBlobID(candidate))) {
+                System.out.println(candidate);
+                processed.put(candidate, true);
+            }
+        }
+        System.out.println();
+        List<String> removed = new ArrayList<String>();
+        removed.addAll(removedFiles);
+        Collections.sort(removed);
+        System.out.println("=== Removed Files ===");
+        for (String removedFile : removed) {
+            System.out.println(removedFile);
+            processed.put(removedFile, true);
+        }
+        System.out.println();
+        List<String> untracked = new ArrayList<String>();
+        for (String candidate : sortedFileNames) {
+            if (!tracker.isStaged(candidate)
+                    && !tracker.isRemoved(candidate)) {
+                untracked.add(candidate);
+            }
+        }
+        Collections.sort(untracked);
+        List<String[]> modified = findModified(tracker, sortedFileNames);
+        System.out.println("=== Modifications Not Staged For Commit ===");
+        for (String[] entry : modified) {
+            System.out.println(String.format("%s (%s)", entry[0], entry[1]));
+        }
+        System.out.println();
+        System.out.println("=== Untracked Files ===");
+        for (String untrackedFile : untracked) {
+            System.out.println(untrackedFile);
+        }
+        System.out.println();
+    }
+
+    /** Return a list of all modified files in FILES using TRACKER. The list
+     *  has entries in the format (FILENAME, HOW_MODIFIED). */
+    static List<String[]> findModified(TrackingManager tracker,
+                                       List<String> files) {
+        List<String[]> result = new ArrayList<String[]>();
+        for (String fileName : plainFilenamesIn(".")) {
+            if (tracker.isStaged(fileName)) {
+                if (tracker.isModified(fileName)) {
+                    result.add(new String[] {fileName, "modified"});
+                }
+            }
+        }
+
+        for (String fileName : tracker.stagedForCommit().keySet()) {
+            File checkExists = new File(fileName);
+            if (!checkExists.exists()) {
+                result.add(new String[] {fileName, "deleted"});
+            }
+        }
+
+        Collections.sort(result, new Comparator<String[]>() {
+            public int compare(String[] a, String[] b) {
+                return a[0].compareTo(b[0]);
+            }
+        });
+        return result;
+    }
+
+    /** The filler string used in the checkout command. */
+    private static final String FILLER = "--";
+
+    /** Do a checkout command from INPUT with GRAPH and TRACKER. */
+    static void doCheckout(InputBuffer input, CommitDAG graph,
+                           TrackingManager tracker) {
+        int argsLeft = input.remaining();
+        if (argsLeft == 1) {
+            branchCheckout(input.next(), graph, tracker);
+        } else if (argsLeft == 2) {
+            input.next(FILLER);
+            fileCheckout(graph.currentBranchHeadID(), input.next(), graph);
+        } else if (argsLeft == 3) {
+            String commitID = input.next();
+            input.next(FILLER);
+            String fileName = input.next();
+            if (commitID.length() < UID_LENGTH) {
+                List<String> ids = graph.resolveAbbrv(commitID);
+                if (ids.size() == 0) {
+                    throw new GitletException("No commit with that id"
+                                              + " exists.");
+                } else {
+                    commitID = ids.get(0);
+                }
+            }
+            fileCheckout(commitID, fileName, graph);
+        }
+    }
+
+    /** Checkout the single file FILENAME from COMMITID.
+     *
+     *  @param GRAPH
+     */
+    static void fileCheckout(String commitID, String fileName,
+                             CommitDAG graph) {
+        fileCheckout(graph.getCommit(commitID), fileName, graph);
+    }
+
+    /** Checkout FILENAME from COMMIT in GRAPH. */
+    static void fileCheckout(Commit commit, String fileName, CommitDAG graph) {
+        if (commit == null) {
+            throw new GitletException("No commit with that id exists.");
+        }
+        Blob blob = commit.getBlob(fileName);
+        if (blob == null) {
+            throw new GitletException("File does not exist in that commit.");
+        }
+
+        byte[] newVersion = blob.contents();
+        File file = new File(fileName);
+        writeContents(file, newVersion);
+    }
+
+    /** Checkout all files in BRANCHNAME, wrt GRAPH and TRACKER. */
+    static void branchCheckout(String branchName, CommitDAG graph,
+                               TrackingManager tracker) {
+        if (!graph.branchExists(branchName)) {
+            throw new GitletException("No such branch exists.");
+        } else if (graph.currentBranch().equals(branchName)) {
+            throw new GitletException("No need to checkout the current "
+                + "branch.");
+        }
+        commitCheckout(graph.branchHead(branchName), graph, tracker);
+        graph.moveToBranch(branchName);
+    }
+
+    /** Checkout all files in commit COMMIT, and adjust TRACKER accordingly.
+     *  @param GRAPH
+    */
+    static void commitCheckout(Commit commit, CommitDAG graph,
+                          TrackingManager tracker) {
+        checkUntrackedFiles(commit.id(), graph, tracker);
+        deleteAllTracked(tracker);
+        for (String fileName : commit.tracking()) {
+            fileCheckout(commit.id(), fileName, graph);
+        }
+        tracker.setHead(commit);
+        clearStagingDir();
+    }
+
+    /** Ensure that a checkout of COMMIT would not overwrite any untracked
+     *  files, using TRACKER. */
+    static void checkUntrackedFiles(Commit commit, TrackingManager tracker) {
+        for (String blobName : commit.tracking()) {
+            File safetyCheck = new File(blobName);
+            if (!tracker.isStaged(blobName) && safetyCheck.exists()) {
+                throw new GitletException("There is an untracked file in the"
+                    + " way; delete or add it first.");
+            }
+        }
+    }
+
+    /** Ensure that a checkout of the commit with sha1 COMMITSHA1
+     *  would not overwrite any untracked files, using TRACKER.
+     *
+     *  @param GRAPH
+     */
+    static void checkUntrackedFiles(String commitSha1, CommitDAG graph,
+                                    TrackingManager tracker) {
+        checkUntrackedFiles(graph.getCommit(commitSha1), tracker);
+    }
+
+    /** Delete everything currently being tracked by TRACKER. */
+    static void deleteAllTracked(TrackingManager tracker) {
+        for (String fileName : tracker.head().tracking()) {
+            restrictedDelete(fileName);
+        }
+    }
+
+    /** Do a branch command wrt INPUT, GRAPH, and TRACKER. */
+    static void doBranch(InputBuffer input, CommitDAG graph,
+                         TrackingManager tracker) {
+        input.expectRemaining(1);
+        graph.addBranch(input.next());
+    }
+
+    /** Do a remove command wrt INPUT, GRAPH, and TRACKER. */
+    static void doRemoveBranch(InputBuffer input, CommitDAG graph,
+                               TrackingManager tracker) {
+        input.expectRemaining(1);
+        String branchName = input.next();
+        if (!graph.branchExists(branchName)) {
+            throw new GitletException("A branch with that name does not"
+                + " exist");
+        } else if (branchName.equals(graph.currentBranch())) {
+            throw new GitletException("Cannot remove the current"
+                + "branch.");
+        }
+        graph.removeBranch(branchName);
+    }
+
+    /** Do a reset command from INPUT on the gitlet system with GRAPH and
+     *  TRACKER. */
+    static void doReset(InputBuffer input, CommitDAG graph,
+                        TrackingManager tracker) {
+        input.expectRemaining(1);
+        String commitID = input.next();
+        Commit target = graph.getCommit(commitID);
+        commitCheckout(target, graph, tracker);
+        graph.advanceCurrentBranch(target.id());
+    }
+
+    /** Do a merge command from INPUT on the gitlet system with GRAPH
+     *  and TRACKER. */
+    static void doMerge(InputBuffer input, CommitDAG graph,
+                        TrackingManager tracker) {
+        input.expectRemaining(1);
+        String mergeBranch = input.next();
+        if (!graph.branchExists(mergeBranch)) {
+            throw new GitletException("A branch with that name does not"
+                + " exist");
+        }
+        String currentBranch = graph.currentBranch();
+        Commit head;
+        Commit toMerge;
+        Commit split;
+
+        head = graph.currentBranchHead();
+        toMerge = graph.branchHead(mergeBranch);
+        split = graph.splitPoint(head, toMerge);
+
+        checkMerge(mergeBranch, split.id(), graph, tracker);
+        stageMerge(head, toMerge, split, graph, tracker);
+
+        String mergeMsg = String.format(Commit.MERGE_MSG,
+                                        mergeBranch,
+                                        currentBranch);
+        doCommit(mergeMsg, graph, tracker, toMerge.id());
+    }
+
+    /** Throw an error if a merge between the current branch and MERGEBRANCH,
+     *  with split point SPLITID with respect to GRAPH and TRACKER would
+     *  be illegal or trivial. */
+    static void checkMerge(String mergeBranch, String splitID, CommitDAG graph,
+                           TrackingManager tracker) {
+        checkUntrackedFiles(graph.branchHeadID(mergeBranch), graph, tracker);
+        if (!tracker.isClear()) {
+            throw new GitletException("You have uncommitted changes.");
+        } else if (mergeBranch.equals(graph.currentBranch())) {
+            throw new GitletException("Cannot merge a branch with itself.");
+        } else if (splitID.equals(graph.branchHeadID(mergeBranch))) {
+            throw new GitletException("Given branch is an ancestor of the "
+                                      + "current branch.");
+        } else if (splitID.equals(graph.currentBranchHeadID())) {
+            graph.advanceCurrentBranch(graph.branchHeadID(mergeBranch));
+            throw new GitletException("Current branch fast-forwarded.");
+        }
+    }
+
+    /** Return the merge of HEAD, TOMERGE with split point SPLIT using
+     *  TRACKER with respect to GRAPH. */
+    static void stageMerge(Commit head, Commit toMerge, Commit split,
+                           CommitDAG graph, TrackingManager tracker) {
+        String headID, splitID, toMergeID;
+        Blob toStage;
+        for (String trackedFile : head.tracking()) {
+            headID = head.getBlobID(trackedFile);
+            splitID = split.getBlobID(trackedFile);
+            if (splitID != null && headID.equals(splitID)
+                    && !toMerge.isTracking(trackedFile)) {
+                doRemove(trackedFile, graph, tracker);
+            }
+        }
+        boolean conflict = false;
+        for (String trackedFile : toMerge.tracking()) {
+            headID = head.getBlobID(trackedFile);
+            toMergeID = toMerge.getBlobID(trackedFile);
+            splitID = split.getBlobID(trackedFile);
+            if (headID == null) {
+                if (splitID == null) {
+                    fileCheckout(toMerge, trackedFile, graph);
+                    toStage = new Blob(new File(trackedFile));
+                    doAdd(toStage, tracker);
+                } else if (toMergeID.equals(splitID)) {
+                    continue;
+                } else {
+                    toStage = Blob.mergedBlob(headID, toMergeID);
+                    doAdd(toStage, tracker);
+                    conflict = true;
+                }
+            } else if (headID.equals(toMergeID)) {
+                continue;
+            } else if (splitID == null) {
+                toStage = Blob.mergedBlob(headID, toMergeID);
+                doAdd(toStage, tracker);
+            } else if (headID.equals(splitID)) {
+                fileCheckout(toMerge, trackedFile, graph);
+                toStage = new Blob(new File(trackedFile));
+                doAdd(toStage, tracker);
+            } else if (toMergeID.equals(splitID)) {
+                continue;
+            } else if (!toMergeID.equals(splitID) && !headID.equals(splitID)) {
+                toStage = Blob.mergedBlob(headID, toMergeID);
+                doAdd(toStage, tracker);
+                conflict = true;
+            }
+        }
+        for (String headTracked : head.tracking()) {
+            headID = head.getBlobID(headTracked);
+            toMergeID = toMerge.getBlobID(headTracked);
+            splitID = split.getBlobID(headTracked);
+            if (toMergeID == null && splitID != null
+                && !headID.equals(splitID)) {
+                toStage = Blob.mergedBlob(headID, null);
+                doAdd(toStage, tracker);
+                conflict = true;
+            }
+        }
+        if (conflict) {
+            System.out.println("Encountered a merge conflict.");
+        }
+    }
+
+    /** Do an add-remote command from INPUT on GRAPH. */
+    static void doAddRemote(InputBuffer input, CommitDAG graph) {
+        input.expectRemaining(2);
+
+    }
+
+    /** Do a remove-remote command from INPUT on GRAPH. */
+    static void doRemoveRemote(InputBuffer input, CommitDAG graph) {
+        input.expectRemaining(1);
+
+    }
+
+    /** Do a fetch command from INPUT on GRAPH using TRACKER. */
+    static void doFetch(InputBuffer input, CommitDAG graph,
+                        TrackingManager tracker) {
+
+    }
+
+    /** Do a pull command from INPUT on GRAPH using TRACKER. */
+    static void doPull(InputBuffer input, CommitDAG graph,
+                       TrackingManager tracker) {
+
+    }
+
+    /** Do a push command from INPUT on GRAPH using TRACKER. */
+    static void doPush(InputBuffer input, CommitDAG graph,
+                       TrackingManager tracker) {
+
+    }
+
+    /** The directory where all of our objects are serialized. */
+    static final String INTERNAL_DIR = ".gitlet" + separator;
+
+    /** The directory where all of our blobs are serialized. */
+    static final String BLOBS_DIR = Blob.internalPath();
+
+    /** The directory where we house staged files. */
+    static final String STAGING_DIR = INTERNAL_DIR + "staging"
+                                      + separator;
+}
