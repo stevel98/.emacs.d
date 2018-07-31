@@ -69,8 +69,6 @@
   "pf"  '(counsel-git :which-key "find file in git dir")
   )
 
-(setq kotlin-tab-width 4)
-
 (which-key-mode)
 (require 'evil)
 (evil-mode 1)

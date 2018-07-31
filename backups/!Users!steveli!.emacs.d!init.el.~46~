@@ -19,7 +19,7 @@
 (setq column-number-mode t)
 
 (add-to-list 'default-frame-alist '(height . 50))
-(add-to-list 'default-frame-alist '(width . 83))
+(add-to-list 'default-frame-alist '(width . 82))
 
 (require 'package)
 (setq package-enable-at-startup nil) ; tells emacs not to load any packages before starting up
@@ -68,8 +68,6 @@
   "p"   '(:ignore t :which-key "project")
   "pf"  '(counsel-git :which-key "find file in git dir")
   )
-
-(setq kotlin-tab-width 4)
 
 (which-key-mode)
 (require 'evil)

@@ -19,7 +19,7 @@
 (setq column-number-mode t)
 
 (add-to-list 'default-frame-alist '(height . 50))
-(add-to-list 'default-frame-alist '(width . 83))
+(add-to-list 'default-frame-alist '(width . 82))
 
 (require 'package)
 (setq package-enable-at-startup nil) ; tells emacs not to load any packages before starting up
@@ -55,7 +55,25 @@
   "M-x" 'counsel-M-x        ; replace default M-x with ivy backend
   )
 
+;;(general-define-key
+;; :prefix "C-c"
+;; ;; bind to simple key press
+;;  "b"	'ivy-switch-buffer  ; change buffer, chose using ivy
+;;  "/"   'counsel-git-grep   ; find string in git project
+;;  ;; bind to double key press
+;;  "ff"  'counsel-find-file  ; find file using ivy
+;;  "fr"	'counsel-recentf    ; find recently edited files
+;;  "pf"  'counsel-git        ; find file in git project
+;;  )
+;;
 (use-package which-key :ensure t)
+;;(use-package which-key :ensure t
+;; :config
+;; (which-key-add-key-based-replacements
+;;  "C-c f" "file"
+;;  "C-c ff" "find file"
+;;  "C-c fr" "recently edited"
+;;  "C-c p"  "project"))
 (general-define-key
  :prefix "C-c"
  ;; bind to simple key press
@@ -68,8 +86,6 @@
   "p"   '(:ignore t :which-key "project")
   "pf"  '(counsel-git :which-key "find file in git dir")
   )
-
-(setq kotlin-tab-width 4)
 
 (which-key-mode)
 (require 'evil)
@@ -85,7 +101,7 @@
     ("543fd63f9763930324ca0f5e63ae2b670925156c5eff6c70fa2578977eba2b01" "aaffceb9b0f539b6ad6becb8e96a04f2140c8faa1de8039a343a4f1e009174fb" "9240e71034689655a6c05c04063af2c90d0a831aa4e7ca24c8b6e29b5a2da946" "4ad63526fc7cc542a258977a4b92c9709611720f7207164aa9df416dc0024be8" default)))
  '(package-selected-packages
    (quote
-    (js2-mode company which-key counsel swiper kotlin-mode haskell-mode challenger-deep-theme use-package general evil avy))))
+    (company which-key counsel swiper kotlin-mode haskell-mode challenger-deep-theme use-package general evil avy))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
