@@ -1,1 +1,3 @@
 *.data
+backups/*
+auto-save-list/*
